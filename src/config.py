@@ -2,7 +2,36 @@
 
 # Chunking
 CHUNK_SIZE = 512  # tokens
+# ~10% of CHUNK_SIZE. Legal text is chunked on MADDE (article) boundaries, so
+# adjacent chunks are usually semantically self-contained and overlap matters
+# less than in prose. Overlap only applies to the token-window fallback paths
+# (oversized articles, documents with no article structure), where it exists to
+# stop a sentence spanning a cut from being lost to both neighbours. Larger
+# values mostly duplicate text in the vector store for little retrieval gain.
 CHUNK_OVERLAP = 50  # tokens
+
+# Token counting is an ESTIMATE, not qwen3's real tokenizer -- counting exactly
+# would mean loading the model's tokenizer for every chunk. Turkish is
+# agglutinative, so a BPE tokenizer emits well over one token per word; this
+# ratio is calibrated to over-estimate slightly, which makes chunks a little
+# smaller than the target rather than overflowing the embedding window.
+# Verify against the real tokenizer before trusting CHUNK_SIZE as a hard limit.
+TOKENS_PER_WORD = 2.0
+
+# Extraction
+# Resolved at runtime by src.extract; set explicitly to override autodetection.
+LIBREOFFICE_PATH = None
+# .doc -> .docx conversions issued per soffice invocation. One process per file
+# is ~10x slower; very large batches risk a single bad file stalling the batch.
+LIBREOFFICE_BATCH_SIZE = 20
+LIBREOFFICE_TIMEOUT = 300  # seconds per batch
+
+# Quality-check thresholds (see src.extract.quality_flags)
+MIN_DOC_CHARS = 200  # below this a document is flagged near-empty
+MIN_PAGE_CHARS = 30  # below this a PDF page is flagged near-empty / needs OCR
+MAX_REPLACEMENT_RATIO = 0.001  # U+FFFD share of text before flagging
+MIN_TURKISH_CHAR_COUNT = 1  # a Turkish regulation with 0 is almost certainly mis-decoded
+MAX_GIBBERISH_RUN = 40  # longest run of non-space chars before flagging
 
 # Retrieval
 TOP_K = 5
