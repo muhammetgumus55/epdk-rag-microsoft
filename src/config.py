@@ -33,6 +33,22 @@ MAX_REPLACEMENT_RATIO = 0.001  # U+FFFD share of text before flagging
 MIN_TURKISH_CHAR_COUNT = 1  # a Turkish regulation with 0 is almost certainly mis-decoded
 MAX_GIBBERISH_RUN = 40  # longest run of non-space chars before flagging
 
+# Measured directly against the real qwen3-embedding-0.6b tokenizer by
+# scripts/validate_tokenizer.py (tokenizing all ~27k real corpus chunks), not
+# estimated. NOT consumed by chunk.py -- TOKENS_PER_WORD above remains the one
+# actual chunking parameter, deliberately left unchanged. Recorded here for
+# future reference only: the validation found the estimate imprecise (chunks
+# run larger than the word-count guess implies) but every chunk stays far
+# under the model's 32768-token context window, so re-chunking would have been
+# churn without benefit. See scripts/validate_tokenizer.py's report for detail.
+# Result (2026-08-20, real qwen3-embedding-0.6b tokenizer, all 27,047 real
+# corpus chunks): mean 2.77 real tokens/word vs the 2.0 estimate -- the
+# estimate UNDER-shoots by ~28%. 41.1% of chunks land over the 512 CHUNK_SIZE
+# target once measured for real, but only 1.14% exceed it by more than 50%,
+# and the largest chunk in the whole corpus is 1,509 real tokens against a
+# 32,768-token model context window (21x headroom). No re-chunking needed.
+MEASURED_TOKENS_PER_WORD = 2.77
+
 # Retrieval
 TOP_K = 5
 SIMILARITY_THRESHOLD = None  # calibrated in Step 5
@@ -50,3 +66,12 @@ EMBEDDING_DIM = 1024
 # quality. Note it cannot co-reside with a chat model on 6GB VRAM (5.5GB alone),
 # so benchmarking it requires load/unload cycling.
 EMBEDDING_MODEL_ALT = "qwen3-embedding-8b"  # 4096-dim per docs; NOT yet verified locally
+
+# Embedding / storage
+# Chunks sent per Foundry Local embeddings.create() call. Large enough to
+# amortize the request round trip over ~27k chunks, small enough that one
+# batch failure (e.g. a transient GPU hiccup) only costs re-embedding this many.
+EMBED_BATCH_SIZE = 32
+EMBED_MAX_RETRIES = 3
+
+DB_PATH = "data/epdk.db"
