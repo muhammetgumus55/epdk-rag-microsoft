@@ -51,12 +51,221 @@ MEASURED_TOKENS_PER_WORD = 2.77
 
 # Retrieval
 TOP_K = 5
-SIMILARITY_THRESHOLD = None  # calibrated in Step 5
+
+# Confidence gate cutoffs for src.retrieval.gate(), on top-1 cosine similarity:
+#   score >= SIMILARITY_THRESHOLD -> ANSWER
+#   score >= SIMILARITY_FLOOR     -> ANSWER_WEAK
+#   below                         -> NOT_FOUND
+#
+# Measured, not guessed: scripts/calibrate_gate.py run against all 27,047 real
+# corpus chunks (2026-08-20, qwen3-embedding-0.6b-cuda-gpu) with 15 questions
+# answerable from the indexed mevzuat and 6 written to sound related but not be
+# covered. Observed top-1 distributions:
+#
+#   answerable    (n=15): min 0.5361  p25 0.6069  median 0.6294  max 0.7468
+#   not answerable (n=6): min 0.3875  p25 0.4977  median 0.5487  max 0.6405
+#
+# The two distributions OVERLAP -- 0.5361 (answerable) sits below 0.6405 (not
+# answerable) -- so no single cutoff separates them and the two values do
+# different jobs. THRESHOLD is the observed cutoff maximizing Youden's J
+# (0.6069, J=0.633: 80% of answerable at or above it, 17% of not-answerable),
+# rounded down to 0.606. FLOOR is anchored just under the lowest answerable
+# score (0.5361 -> 0.53) so no genuinely answerable question is ever refused;
+# it rejects the two clearly-unrelated questions (0.3875, 0.4977) outright and
+# leaves the rest in ANSWER_WEAK.
+#
+# Known limit these numbers cannot fix: a question about a NEIGHBOURING energy
+# domain (natural gas / LPG / petroleum) retrieves the electricity analogue at
+# a genuinely high cosine -- "Doğal gaz dağıtım şirketlerinin abone bağlantı
+# bedeli" hit the electricity Dağıtım Bağlantı Bedelleri Tebliği at 0.6405,
+# above THRESHOLD. Dense similarity has no way to see that "doğal gaz" is the
+# one word that matters. Lexical/BM25 fusion is the fix, not a higher cutoff.
+#
+# Second known limit, and the bigger one: these cutoffs assume the query is
+# typed with Turkish diacritics. calibrate_gate.py's diacritics probe re-ran
+# all 21 questions ASCII-folded ("önlisans süresi" -> "onlisans suresi", which
+# is how people actually type) and 8 of 21 gate decisions changed, two of them
+# from a correct ANSWER to NOT_FOUND. Mean score change -0.0376, worst -0.2062.
+# The retrieved chunk is often still correct -- only the score collapses -- so
+# this is a scoring problem, not a ranking one. Needs a real fix (query
+# normalization, diacritic-restoring, or lexical fusion) before these cutoffs
+# can be trusted against untreated user input.
+#
+# SUPERSEDED (Step 5): these two are the DENSE-ONLY cutoffs. They are no longer
+# what gate() uses -- FUSION_THRESHOLD / FUSION_FLOOR below are. Kept because
+# retrieve_dense() remains callable as the baseline hybrid must beat, and
+# gate_dense() still scores against these.
+SIMILARITY_THRESHOLD = 0.606
+SIMILARITY_FLOOR = 0.53
+
+# --------------------------------------------------------------------------
+# Lexical (BM25) retrieval -- src/lexical.py
+# --------------------------------------------------------------------------
+# Standard Robertson BM25 parameters. k1 controls term-frequency saturation,
+# b controls length normalization. Left at the literature defaults: the corpus
+# is chunked to a fairly uniform size already (article-level), so there is
+# little length variance for b to correct, and no evidence yet that tuning
+# these beats tuning the fusion instead.
+BM25_K1 = 1.5
+BM25_B = 0.75
+
+# --------------------------------------------------------------------------
+# Fusion -- Reciprocal Rank Fusion of dense + BM25
+# --------------------------------------------------------------------------
+# RRF scores a document as sum over rankers of 1/(k + rank). k damps the
+# influence of top ranks: small k lets a single ranker's #1 dominate, large k
+# flattens toward a plain rank average. 60 is the value from the original
+# Cormack et al. RRF paper and is what the calibration below was run with.
+RRF_K = 60
+# Confidence gate cutoffs -- what gate() actually uses. These REPLACE the
+# dense-only SIMILARITY_* values above.
+#
+# They threshold retrieval.fusion_confidence() = dense_top1 x idf_coverage,
+# NOT the RRF score. The first hybrid calibration run did threshold raw RRF and
+# it failed outright: RRF is computed from rank positions alone, so top-1
+# scores clustered at ~0.0328 (both rankers agree) or ~0.0164 (one does), and
+# the classes separated WORSE than dense-only (answerable min 0.01639 vs
+# not-answerable max 0.03252). RRF ranks well and measures confidence not at
+# all. scripts/eval_gate_signals.py then compared six candidate signals on the
+# same questions; dense_top1 x idf_coverage won on both separation and
+# stability under ASCII folding:
+#
+#   signal              Youden's J   fold-stable
+#   dense_top1              0.500        16/21     <- Step 4 baseline
+#   lexical_norm            0.567        20/21
+#   coverage_topk           0.700        18/21
+#   dense_x_lexnorm         0.600        17/21
+#   mean_dense_cov          0.767        18/21
+#   dense_x_coverage        0.767        19/21     <- chosen
+#
+# Calibrated 2026-08-20 over all 27,047 chunks, same 15 answerable + 6
+# not-answerable questions as Step 4, each run as typed and ASCII-folded:
+#
+#   answerable    (n=15): min 0.18711  median 0.41196  max 0.67547
+#   not answerable (n=6): min 0.07942  median 0.18834  max 0.50644
+#
+# Classes still overlap, so as in Step 4 the two cutoffs do different jobs:
+# THRESHOLD is the Youden-optimal observed cutoff (0.23963; 93% of answerable
+# at or above it, 17% of not-answerable), FLOOR is anchored at the lowest
+# answerable score so nothing answerable is ever refused.
+#
+# Measured effect vs the Step 4 dense-only gate:
+#   gate accuracy, ASCII-folded input :  16/21 -> 18/21
+#   gate accuracy, as typed           :  17/21 -> 17/21
+#   decisions that flip under folding :      8 -> 4  (7 of Step 4's 8 now agree)
+#
+# STILL UNFIXED: "Doğal gaz dağıtım şirketlerinin abone bağlantı bedeli" is
+# still ANSWER (0.50644). BM25 cannot demote it because "doğal" and "gaz" both
+# genuinely occur in this electricity corpus (the Electricity Market Law
+# references natural gas), so IDF coverage stays high at 0.796. Distinguishing
+# "a question ABOUT natural gas" from "an electricity rule that MENTIONS
+# natural gas" needs document-level domain filtering or a reranker, not term
+# statistics. The related "rafinerici / petrol stoku" question did improve
+# sharply (0.5536 -> 0.21310, now just above the floor rather than mid-band).
+FUSION_THRESHOLD = 0.23963
+FUSION_FLOOR = 0.1871
+# How deep each ranker goes before fusion. Fusion can only rescue a chunk that
+# at least one ranker surfaced, so this is set well above TOP_K -- the whole
+# point is for BM25 to promote something dense ranked 30th, and vice versa.
+FUSION_CANDIDATES = 50
 
 # Models (Foundry Local, OpenAI-compatible endpoint)
 # Aliases; the server resolves these to hardware variants (e.g. qwen3-4b-cuda-gpu).
 CHAT_MODEL = "qwen3-4b"
 EMBEDDING_MODEL = "qwen3-embedding-0.6b"
+
+# --------------------------------------------------------------------------
+# Generation -- src/llm.py, src/answer.py
+# --------------------------------------------------------------------------
+# Regulatory answers must be reproducible: the same question must not produce a
+# different answer on a second run. Sampling variance is a defect here, not a
+# feature, so temperature is pinned at 0 and never exposed as a tunable.
+CHAT_TEMPERATURE = 0.0
+
+# Greedy decoding (temperature 0) on a 4B model fed long, partly duplicated legal
+# text reliably falls into a repetition loop: an observed answer repeated
+# "...tedarikçisini seçme hakkını kullanmayan serbest tüketici" for the entire
+# 900-token completion budget. A frequency penalty breaks the loop and, unlike
+# raising the temperature, is a deterministic logit transform -- identical
+# questions still produce identical answers, so reproducibility is preserved.
+# Verified honoured by this Foundry Local build (unlike chat_template_kwargs).
+CHAT_FREQUENCY_PENALTY = 1.1
+
+# qwen3-4b's DECLARED context window, read from its genai_config.json in
+# Foundry Local's model cache (~/.foundry/cache/models/**/qwen3-4b-*/genai_config.json,
+# "model.context_length"). Exact, not estimated -- Step 1 recorded the embedding
+# dimension but never the chat window, so it was measured for Step 5.
+#
+# NOT the number budgeting uses. See CHAT_EFFECTIVE_CONTEXT.
+CHAT_CONTEXT_WINDOW = 40960
+
+# The window this machine can ACTUALLY serve, measured 2026-08-26. The declared
+# 40,960 is unreachable here and budgeting against it crashes the server.
+#
+# Why: the RAG pipeline needs both models resident at once (embedding for the
+# query, chat for generation). On this 6 GB RTX 4050 that is qwen3-4b (2.6 GB) +
+# qwen3-embedding-0.6b (478 MB), leaving ~2.7 GB for the KV cache. Asking for a
+# prompt the declared window permits makes onnxruntime-genai fail its KV
+# allocation with a CUDA OOM, surfaced as an HTTP 500:
+#
+#   "Failed to handle OpenAI completion: CUDA error in CudaMallocArray
+#    at .../cuda_common.h:131 - out of memory"
+#
+# The budget is on prompt + completion together, not the prompt alone: the KV
+# cache grows with the whole sequence, so a longer answer costs the same
+# resource a longer prompt does.
+#
+# Measured with both models loaded, prompt sizes counted with qwen3-4b's real
+# tokenizer:
+#
+#   total tokens        result
+#   ~1,951              OK   (VRAM immediately 5897 / 6141 MiB)
+#   ~3,583              OK   one-shot
+#   ~4,007 x6           OK   sustained over 6 sequential calls, VRAM flat at 5907 MiB
+#   ~4,111              OK   one-shot
+#   ~12,000             OOM  outright
+#
+# IMPORTANT measurement caveat, because it produced a wrong number the first
+# time: a failed allocation fragments VRAM and is not cleaned up, so every
+# request after an OOM fails at sizes that work fine on a fresh server. An early
+# probe read ~3,873 as the ceiling purely because a previous request had already
+# OOMed. `foundry server restart` between probes is required, and a ceiling
+# measured without it will understate the real one.
+#
+# 4000 total is the largest configuration proven stable across repeated calls
+# with a clean server. This is a hardware limit, not a model limit -- on a GPU
+# with more VRAM, raise it toward CHAT_CONTEXT_WINDOW. Re-measure, do not guess.
+CHAT_EFFECTIVE_CONTEXT = 4000
+
+# Reserved for the answer itself. Qwen3 emits a <think> block before its answer
+# even when thinking is suppressed with /no_think, and that block spends
+# completion tokens, so this cannot be trimmed to just the visible answer.
+#
+# 400 was measurably too small: the model spent it restating the question and was
+# cut off mid-sentence before citing any KAYNAK label, which loses the citation
+# entirely. SYSTEM_PROMPT now forbids restating the question and caps the answer
+# at four sentences, and this was raised alongside that.
+CHAT_MAX_COMPLETION_TOKENS = 900
+
+# Slack between our own tokenizer count and the server's. The server applies a
+# chat template (role markers, turn delimiters) that our per-message count
+# approximates rather than reproduces exactly; budgeting is only safe if it
+# errs high. Measured overhead was well under this on every probe.
+CONTEXT_SAFETY_MARGIN = 96
+
+# Per-message framing cost in the chat template, added on top of the token count
+# of each message's content when budgeting.
+TOKENS_PER_MESSAGE = 4
+
+# Multi-turn history -- src/session.py
+# Only the last N question/answer exchanges are kept. Three is what the context
+# budget above can afford alongside retrieved chunks; it is not a guess about
+# what users need.
+SESSION_MAX_TURNS = 3
+
+# Budget for the follow-up classification + query rewrite call. The rewrite
+# returns one short standalone question, so this stays small.
+REWRITE_MAX_COMPLETION_TOKENS = 160
 
 # Observed empirically in scripts/verify_foundry.py — not from documentation.
 # The vector store schema depends on this exact value.
