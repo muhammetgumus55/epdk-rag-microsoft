@@ -61,7 +61,13 @@ class DimensionMismatch(Exception):
 def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     path = Path(db_path if db_path is not None else config.DB_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    # check_same_thread=False: callers that share one long-lived connection
+    # across threads (e.g. app.py's Streamlit UI, where every rerun executes
+    # on its own OS thread) are responsible for their own serialization --
+    # app.py does this via GENERATION_LOCK. sqlite3's own thread-affinity
+    # check has no knowledge of that lock and would reject the same safe
+    # access pattern outright.
+    conn = sqlite3.connect(str(path), check_same_thread=False)
     # WAL: readers (retrieval) are never blocked by an in-progress ingest, and
     # committed batches survive a crash mid-run -- both matter for resumability.
     conn.execute("PRAGMA journal_mode=WAL")

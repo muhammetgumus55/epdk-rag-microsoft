@@ -1,4 +1,6 @@
 """Tests for the SQLite chunk/embedding store."""
+import threading
+
 import numpy as np
 import pytest
 
@@ -291,3 +293,59 @@ class TestIngestDocumentLogic:
         matrix, ids = store.fetch_active_embeddings(conn)
         assert matrix.shape[0] == 2  # only v2's chunks are active
         assert store.has_active_chunks(conn, "hash-v1") is False
+
+
+class TestCrossThreadConnection:
+    """A connection from store.connect() must be usable from any thread.
+
+    app.py holds one connection (via st.cache_resource) across Streamlit's
+    per-rerun threads, serialized by its own lock rather than sqlite3's
+    thread-affinity check -- see store.connect()'s check_same_thread=False.
+    Without it, a read issued from a thread other than the one that opened
+    the connection raises "SQLite objects created in a thread can only be
+    used in that same thread."
+    """
+
+    def test_read_from_a_different_thread_than_the_connection_was_opened_on(self, conn):
+        store.insert_chunks(
+            conn, source_path="p", file_sha256="hash-cross-thread", document_title="X",
+            chunks=[make_chunk()], embeddings=[np.zeros(config.EMBEDDING_DIM, dtype=np.float32)],
+            quality_flag=None,
+        )
+
+        result: dict = {}
+
+        def read_from_other_thread():
+            try:
+                matrix, ids = store.fetch_active_embeddings(conn)
+                result["matrix"] = matrix
+                result["ids"] = ids
+            except Exception as exc:  # noqa: BLE001 - captured to fail the test with detail
+                result["error"] = exc
+
+        worker = threading.Thread(target=read_from_other_thread)
+        worker.start()
+        worker.join()
+
+        assert "error" not in result, f"cross-thread read raised: {result.get('error')}"
+        assert result["matrix"].shape == (1, config.EMBEDDING_DIM)
+
+    def test_close_from_a_different_thread_than_the_connection_was_opened_on(self, tmp_path):
+        # Regression for the exact crash found in manual QA: app.py's old
+        # _rebind_connection() closed the previous connection from whatever
+        # thread the current Streamlit rerun happened to be on, which is
+        # never guaranteed to be the thread that opened it.
+        c = store.connect(tmp_path / "close-cross-thread.db")
+        errors: list[Exception] = []
+
+        def close_from_other_thread():
+            try:
+                c.close()
+            except Exception as exc:  # noqa: BLE001 - captured to fail the test with detail
+                errors.append(exc)
+
+        worker = threading.Thread(target=close_from_other_thread)
+        worker.start()
+        worker.join()
+
+        assert not errors, f"cross-thread close raised: {errors}"
