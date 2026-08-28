@@ -202,6 +202,7 @@ _LEADING_HEADING = re.compile(r"^\s*(?:#{1,6}\s*)?\*{0,2}[^\n.!?]{0,120}\*{0,2}\
 
 
 def strip_leading_heading(answer: str) -> str:
+    """Drop a leading empty heading line the model added despite being told not to."""
     lines = answer.split("\n")
     if len(lines) < 2:
         return answer.strip()
@@ -254,6 +255,7 @@ class SourceBlock:
     tokens: int
 
     def render(self) -> str:
+        """The exact text sent to the model for this source: a KAYNAK-labelled block."""
         return f"KAYNAK {self.label}:\n{self.text}"
 
 
@@ -272,6 +274,7 @@ class Citation:
 
     @classmethod
     def from_block(cls, block: SourceBlock) -> "Citation":
+        """Build a citation from the store's own metadata, never from model output."""
         r = block.result
         return cls(
             label=block.label,
@@ -285,6 +288,7 @@ class Citation:
         )
 
     def render(self) -> str:
+        """Human-readable citation line: [KAYNAK n] title / article / pages."""
         parts = [self.document_title or self.source_path]
         if self.article_ref:
             parts.append(self.article_ref)
@@ -321,6 +325,7 @@ class GeneratedAnswer:
 
     @property
     def cited_labels(self) -> list[int]:
+        """KAYNAK labels the model actually cited, in citation order."""
         return [c.label for c in self.citations]
 
 
@@ -502,6 +507,7 @@ class Answerer:
 
     @classmethod
     def open(cls, db_path: str | None = None) -> "Answerer":
+        """Connect the retriever and chat client. Call once and reuse the result."""
         return cls(retriever=Retriever.open(db_path), client=ChatClient.connect())
 
     def answer(
@@ -639,6 +645,7 @@ class Answerer:
         return answer
 
     def close(self) -> None:
+        """Release the underlying SQLite connection."""
         self.retriever.close()
 
 
@@ -648,6 +655,7 @@ class Answerer:
 
 
 def format_answer(answer: GeneratedAnswer, show_sources: bool = False) -> str:
+    """Render one answer as the CLI's human-readable report block."""
     lines: list[str] = []
     lines.append("=" * 72)
     lines.append(f"SORU     : {answer.question}")
@@ -723,6 +731,7 @@ def format_answer(answer: GeneratedAnswer, show_sources: bool = False) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: answer one question (and optional follow-ups) and print the report."""
     import argparse
 
     from .extract import _force_utf8_stdout

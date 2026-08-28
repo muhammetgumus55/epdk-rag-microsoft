@@ -59,6 +59,7 @@ class DimensionMismatch(Exception):
 
 
 def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
+    """Open (creating if needed) the chunk store and ensure its schema exists."""
     path = Path(db_path if db_path is not None else config.DB_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     # check_same_thread=False: callers that share one long-lived connection
@@ -330,6 +331,7 @@ def run_ingest(root: Path, db_path: str | Path | None = None, verbose: bool = Tr
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: run the full extract -> chunk -> embed -> store pipeline."""
     import argparse
 
     from .embed import FoundryUnavailable

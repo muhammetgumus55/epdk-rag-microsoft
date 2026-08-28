@@ -91,6 +91,8 @@ def resolve_model_id(client: OpenAI, alias: str) -> str:
 
 @dataclass
 class EmbeddingClient:
+    """A loaded Foundry Local embedding model, reused across calls."""
+
     client: OpenAI
     model_id: str
     dimension: int

@@ -178,6 +178,7 @@ class BM25Index:
 
     @property
     def vocabulary_size(self) -> int:
+        """Number of distinct terms in the index."""
         return len(self.postings)
 
     def idf(self, term: str) -> float:

@@ -132,6 +132,7 @@ class TokenCounter:
 
     @classmethod
     def load(cls, alias: str | None = None) -> "TokenCounter":
+        """Load the model's real tokenizer if found; else fall back to the estimate."""
         alias = alias or config.CHAT_MODEL
         path = find_tokenizer(alias)
         if path is None:
@@ -146,6 +147,7 @@ class TokenCounter:
             return cls()
 
     def count(self, text: str) -> int:
+        """Token count for one string, exact if the real tokenizer loaded, else estimated."""
         if self.tokenizer is not None:
             return len(self.tokenizer.encode(text, add_special_tokens=False).ids)
         # Deliberately rounds up: over-counting shrinks the prompt, under-counting
@@ -179,6 +181,7 @@ class ChatClient:
 
     @classmethod
     def connect(cls, alias: str | None = None) -> "ChatClient":
+        """Discover the Foundry Local daemon, load the model, and load its tokenizer."""
         alias = alias or config.CHAT_MODEL
         endpoint = discover_endpoint()
         client = OpenAI(base_url=endpoint, api_key="not-needed")
@@ -201,6 +204,7 @@ class ChatClient:
         )
 
     def count_messages(self, messages: list[Message]) -> int:
+        """Token cost of a whole message list, via this client's counter."""
         return self.counter.count_messages(messages)
 
     def complete(

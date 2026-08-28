@@ -71,6 +71,8 @@ class Page:
 
 @dataclass
 class ExtractedDoc:
+    """One successfully extracted document: its pages, identity, and quality flags."""
+
     path: Path
     original_filename: str
     doc_id: str
@@ -83,15 +85,19 @@ class ExtractedDoc:
 
     @property
     def text(self) -> str:
+        """The whole document as one string, pages joined and blanks dropped."""
         return "\n\n".join(p.text for p in self.pages if p.text.strip())
 
     @property
     def has_pages(self) -> bool:
+        """Whether this document has a real page model (PDF) vs none (docx)."""
         return any(p.number is not None for p in self.pages)
 
 
 @dataclass
 class SkippedDoc:
+    """A file that was not extracted, with the reason why."""
+
     path: Path
     reason: str
 
@@ -553,6 +559,7 @@ _SKIP_REASONS = {
 
 
 def iter_corpus_files(root: Path) -> list[Path]:
+    """All files under root, recursively, in a stable sorted order."""
     return sorted(p for p in root.rglob("*") if p.is_file())
 
 
@@ -593,6 +600,8 @@ def extract_file(path: Path, converted: Path | None = None) -> ExtractedDoc:
 
 @dataclass
 class ExtractionRun:
+    """The outcome of extracting a whole corpus: what worked, what didn't, and why."""
+
     docs: list[ExtractedDoc] = field(default_factory=list)
     skipped: list[SkippedDoc] = field(default_factory=list)
     failed: list[SkippedDoc] = field(default_factory=list)
@@ -706,6 +715,7 @@ def _rel(path: Path, root: Path) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: extract the corpus and print an extraction report."""
     import argparse
 
     from .chunk import chunk_document

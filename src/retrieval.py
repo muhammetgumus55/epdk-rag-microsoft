@@ -72,6 +72,7 @@ class RetrievalResult:
 
     @classmethod
     def from_metadata(cls, meta: dict, score: float, **provenance) -> "RetrievalResult":
+        """Build a result from a store.fetch_chunk_metadata() row plus its score."""
         return cls(
             chunk_id=meta["id"],
             score=score,
@@ -251,6 +252,12 @@ def _l2_normalize(matrix: np.ndarray) -> np.ndarray:
 
 @dataclass
 class Retriever:
+    """Hybrid dense + BM25 retrieval over one SQLite-backed chunk store.
+
+    Holds the whole embedding matrix in memory (see module docstring) plus the
+    BM25 index and the store connection used for per-hit metadata lookups.
+    """
+
     conn: sqlite3.Connection
     embedder: EmbeddingClient
     matrix: np.ndarray  # (N, EMBEDDING_DIM) float32, L2-normalized
@@ -438,6 +445,7 @@ class Retriever:
         return gate(score), score, results
 
     def close(self) -> None:
+        """Close the underlying SQLite connection."""
         self.conn.close()
 
 
@@ -447,6 +455,7 @@ class Retriever:
 
 
 def format_results(results: list[RetrievalResult], text_chars: int = 400) -> str:
+    """Render retrieved chunks as the CLI's human-readable ranked list."""
     lines: list[str] = []
     for rank, r in enumerate(results, start=1):
         lines.append(f"\n[{rank}] score={r.score:.5f}  {r.citation()}")
@@ -471,6 +480,7 @@ def format_results(results: list[RetrievalResult], text_chars: int = 400) -> str
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: run one query through retrieval and print the ranked results."""
     import argparse
 
     from .embed import FoundryUnavailable

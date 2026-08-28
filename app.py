@@ -148,6 +148,7 @@ def _check_password(entered: str, configured: str) -> bool:
 
 
 def require_login() -> None:
+    """Render the password gate and halt the script until it is passed."""
     if st.session_state.get("authenticated"):
         return
 
@@ -189,6 +190,7 @@ def require_login() -> None:
 
 @st.cache_resource(show_spinner=False)
 def load_answerer() -> Answerer:
+    """Build the RAG pipeline once per process and cache it across every session."""
     logger.info("loading retriever + chat client (once per process)")
     started = time.perf_counter()
     answerer = Answerer.open()
@@ -198,6 +200,7 @@ def load_answerer() -> Answerer:
 
 @st.cache_resource(show_spinner=False)
 def get_generation_lock() -> threading.Lock:
+    """One lock shared by every session and rerun, serializing pipeline calls."""
     return threading.Lock()
 
 
@@ -224,6 +227,7 @@ STAGE_LABEL = "\U0001f50d Aranıyor · ⚖️ Değerlendiriliyor · ✍️ Yanı
 
 
 def run_pipeline(session: Session, question: str) -> GeneratedAnswer:
+    """Answer one question, waiting for the shared generation lock if busy."""
     lock = get_generation_lock()
     stage_ph = st.empty()
     waited = False
@@ -253,6 +257,7 @@ def run_pipeline(session: Session, question: str) -> GeneratedAnswer:
 
 
 def render_timings(answer: GeneratedAnswer) -> None:
+    """Show the per-stage latency breakdown as a caption line."""
     t = answer.timings
     if not t:
         return
@@ -271,6 +276,7 @@ def render_timings(answer: GeneratedAnswer) -> None:
 
 
 def render_citations(answer: GeneratedAnswer) -> None:
+    """Render each citation as an expander showing its source text."""
     st.markdown('<div class="epdk-kaynakca-label">KAYNAKÇA</div>', unsafe_allow_html=True)
     for citation in answer.citations:
         idx = citation.label - 1
@@ -284,6 +290,7 @@ def render_citations(answer: GeneratedAnswer) -> None:
 
 
 def render_answer(answer: GeneratedAnswer) -> None:
+    """Render one answer: rewrite note, gate-appropriate body, citations, timings."""
     if answer.rewritten_query and answer.rewritten_query != answer.question:
         st.caption(f"Takip sorusu olarak yeniden yazıldı: _{answer.rewritten_query}_")
 
@@ -322,6 +329,7 @@ def render_answer(answer: GeneratedAnswer) -> None:
 
 
 def render_sidebar(answerer: Answerer) -> None:
+    """Render the sidebar: session controls, system stats, known limitations."""
     with st.sidebar:
         st.markdown("**EPDK Mevzuat Asistanı**")
         st.caption("Elektrik piyasası mevzuatı — iç kullanım")
@@ -359,6 +367,7 @@ def render_sidebar(answerer: Answerer) -> None:
 
 
 def main() -> None:
+    """Page entry point: login gate, pipeline load, chat history, and input loop."""
     require_login()
 
     try:

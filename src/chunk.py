@@ -46,6 +46,8 @@ _KIND_CANON = {"madde": "MADDE", "geçici madde": "GEÇİCİ MADDE", "ek madde":
 
 @dataclass(frozen=True)
 class ArticleRef:
+    """One article heading: its numbering namespace (kind) plus its number."""
+
     kind: str  # MADDE | GEÇİCİ MADDE | EK MADDE - distinct namespaces
     number: str
 
@@ -55,6 +57,8 @@ class ArticleRef:
 
 @dataclass
 class Chunk:
+    """One piece of a document as it will be embedded and stored."""
+
     doc_id: str
     text: str
     strategy: str
@@ -70,6 +74,7 @@ class Chunk:
 
     @property
     def citation(self) -> str:
+        """Human-readable citation: title - article (pages)."""
         base = self.document_title or self.doc_id
         if self.article:
             base = f"{base} - {self.article}"

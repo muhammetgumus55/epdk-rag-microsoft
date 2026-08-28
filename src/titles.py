@@ -114,6 +114,8 @@ _TYPE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 
 @dataclass
 class TitleInfo:
+    """Identity derived from a document's content: title, type, number, RG reference."""
+
     title: str | None = None
     mevzuat_type: str | None = None
     number: str | None = None
