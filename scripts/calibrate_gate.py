@@ -72,7 +72,50 @@ QUESTIONS: list[tuple[str, bool]] = [
     # -- expected NOT answerable: unrelated to energy regulation entirely -----
     ("Konut kira sözleşmesinin feshi için ihtarname süresi ne kadardır?", False),
     ("Deniz balıkçılığında av yasağı dönemleri hangi aylardır?", False),
+    # -- the three real failures reported 2026-08-29 -------------------------
+    # Answered from the live corpus by a user. Pinned here permanently: the
+    # first two were caused by omnibus scope leakage and are fixed by
+    # docs/decisions/2026-08-29-omnibus-scope-filter.md; the third is NOT, and
+    # its unfixability is the point of measuring it here every run.
+    ("Kıdem tazminatı nasıl hesaplanır?", False),
+    ("Trafik cezası itiraz süresi nedir?", False),
+    ("Vergi levhası nereye asılır?", False),
+    # -- expected NOT answerable: legal domains with ZERO conceptual overlap --
+    #
+    # The pre-existing negatives were all energy-adjacent (doğal gaz, LPG,
+    # petrol) plus two strays, which measured only the hardest case. These
+    # measure the case the corpus leak actually broke: questions sharing no
+    # vocabulary and no concepts with electricity regulation, where NOT_FOUND
+    # should be easy and any ANSWER is a scope defect rather than a close call.
+    #
+    # İş hukuku (labour)
+    ("İşçinin yıllık ücretli izin süresi kaç gündür?", False),
+    ("Toplu iş sözleşmesi en fazla kaç yıl süreyle yapılabilir?", False),
+    # Vergi hukuku (tax)
+    ("Katma değer vergisi beyannamesi hangi tarihe kadar verilir?", False),
+    ("Gelir vergisi tarifesindeki dilimler nasıl belirlenir?", False),
+    # Trafik (traffic)
+    ("Sürücü belgesi kaç yılda bir yenilenir?", False),
+    ("Alkollü araç kullanmanın idari para cezası ne kadardır?", False),
+    # Ceza hukuku (criminal)
+    ("Kasten yaralama suçunun cezası nedir?", False),
+    ("Tutukluluk süresinin azami sınırı ne kadardır?", False),
+    # Aile hukuku (family)
+    ("Anlaşmalı boşanma davası nasıl açılır?", False),
+    ("Nafaka miktarı neye göre belirlenir?", False),
+    # Memur hukuku (civil servants)
+    ("Devlet memuruna verilen disiplin cezasına itiraz süresi nedir?", False),
+    ("Memur aylık katsayısı hangi usulle belirlenir?", False),
 ]
+
+# The three failures reported 2026-08-29, with the fusion confidence each
+# scored against the UNFILTERED corpus. Pinned so the report can show
+# before/after rather than asserting an improvement.
+REAL_FAILURES = {
+    "Kıdem tazminatı nasıl hesaplanır?": 0.29203,
+    "Trafik cezası itiraz süresi nedir?": 0.23971,
+    "Vergi levhası nereye asılır?": 0.10336,
+}
 
 # The two domain-mismatch questions Step 4 singled out, with their dense
 # cosines. "doğal gaz" scored 0.6405 -> ANSWER (wrong); the rafinerici question
@@ -312,6 +355,45 @@ def main() -> int:
     deltas = [p.fused_folded - p.fused for p in probes]
     print(f"  Fused score change under folding: mean {statistics.mean(deltas):+.5f}, "
           f"worst {min(deltas):+.5f}, best {max(deltas):+.5f}")
+
+    # ---------------------------------------------------------------- failure class 3
+    print()
+    print("=" * 100)
+    print("FAILURE CLASS 3 -- THE THREE REAL FAILURES (2026-08-29)")
+    print("=" * 100)
+    print("  Scores before are against the UNFILTERED corpus, i.e. before")
+    print("  docs/decisions/2026-08-29-omnibus-scope-filter.md was applied.")
+    for p in probes:
+        if p.question not in REAL_FAILURES:
+            continue
+        before_score = REAL_FAILURES[p.question]
+        before = _decision(before_score, config.FUSION_THRESHOLD, config.FUSION_FLOOR)
+        after = _decision(p.fused, threshold, floor)
+        verdict = "FIXED" if after == "NOT_FOUND" else (
+            "STILL WRONG" if after == "ANSWER" else "improved (no longer ANSWER)"
+        )
+        print(f"\n  {p.question}")
+        print(f"    before (unfiltered corpus, old cutoffs): {before_score:.5f} -> {before}")
+        print(f"    after  (filtered corpus, new cutoffs)  : {p.fused:.5f} -> {after}"
+              f"    [{verdict}]")
+        print(f"    IDF coverage: {p.coverage:.3f}   top-1 now: {p.citation[:74]}")
+
+    # ------------------------------------------------- out-of-domain sweep
+    print()
+    print("=" * 100)
+    print("OUT-OF-DOMAIN SWEEP -- legal domains with no overlap with electricity")
+    print("=" * 100)
+    off_domain = [p for p in probes if not p.answerable and p.question not in DOMAIN_MISMATCH]
+    refused = [p for p in off_domain if _decision(p.fused, threshold, floor) == "NOT_FOUND"]
+    print(f"  {len(refused)}/{len(off_domain)} correctly gated to NOT_FOUND.")
+    leaking = [p for p in off_domain if _decision(p.fused, threshold, floor) != "NOT_FOUND"]
+    if leaking:
+        print("\n  Still not refused:")
+        for p in sorted(leaking, key=lambda x: -x.fused):
+            print(f"    {p.fused:.5f}  {_decision(p.fused, threshold, floor):<12} {p.question}")
+            print(f"    {'':13}top-1: {p.citation[:78]}")
+    else:
+        print("  None leaking.")
 
     # ---------------------------------------------------------------- overall accuracy
     print()
