@@ -87,6 +87,7 @@ footer {visibility: hidden;}
 .epdk-not-found {
     border-left: 4px solid #8a8a82;
     background: #f2f1ec;
+    color: #33322c;
     padding: 1rem 1.15rem;
     border-radius: 3px;
     white-space: pre-line;
@@ -121,6 +122,45 @@ footer {visibility: hidden;}
     color: #b8860b;
     font-family: -apple-system, "Segoe UI", sans-serif;
     font-size: 0.92rem;
+}
+
+/* The palette above is written for a light page. Streamlit follows the
+   viewer's OS/browser theme, and on a dark one every box here became a light
+   card whose text colour was inherited from the dark theme -- white on cream,
+   i.e. invisible (observed on the NOT_FOUND box, which set no colour at all).
+   Each box is restated below with a dark ground and its own light text, so
+   contrast never depends on what the surrounding theme happens to inherit. */
+@media (prefers-color-scheme: dark) {
+    .epdk-caption {
+        color: #a3a29a;
+    }
+
+    .epdk-low-confidence {
+        background: #2a2413;
+        color: #e8cf8a;
+    }
+
+    .epdk-not-found {
+        background: #212227;
+        color: #d9d8d1;
+    }
+
+    .epdk-error {
+        background: #2c1a16;
+        color: #f0b5a5;
+    }
+
+    .epdk-kaynakca-label {
+        color: #a3a29a;
+    }
+
+    .epdk-stage {
+        color: #a8a8a0;
+    }
+
+    .epdk-waiting {
+        color: #e0b64a;
+    }
 }
 </style>
 """,
