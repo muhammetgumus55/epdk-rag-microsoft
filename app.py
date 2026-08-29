@@ -367,8 +367,7 @@ def render_sidebar(answerer: Answerer) -> None:
 
 
 def main() -> None:
-    """Page entry point: login gate, pipeline load, chat history, and input loop."""
-    require_login()
+    """Page entry point: pipeline load, chat history, and input loop."""
 
     try:
         with st.spinner("Modeller yükleniyor (chat + gömme, VRAM'e alınıyor)..."):
