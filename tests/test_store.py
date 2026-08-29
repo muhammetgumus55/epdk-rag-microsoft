@@ -266,14 +266,14 @@ class TestIngestDocumentLogic:
         doc = self._fake_doc(tmp_path, "MADDE 1 - Birinci hüküm.\nMADDE 2 - İkinci hüküm.")
         embedder = self.FakeEmbedder()
 
-        embedded1, skipped1 = store.ingest_document(conn, embedder, doc, tmp_path)
-        assert embedded1 == 2
-        assert skipped1 == 0
+        first = store.ingest_document(conn, embedder, doc, tmp_path)
+        assert first.embedded == 2
+        assert first.skipped == 0
         calls_after_first = embedder.calls
 
-        embedded2, skipped2 = store.ingest_document(conn, embedder, doc, tmp_path)
-        assert embedded2 == 0
-        assert skipped2 == 2
+        second = store.ingest_document(conn, embedder, doc, tmp_path)
+        assert second.embedded == 0
+        assert second.skipped == 2
         assert embedder.calls == calls_after_first  # no new API calls at all
 
     def test_changed_content_retires_old_chunks_and_embeds_new(self, conn, tmp_path):
@@ -286,9 +286,9 @@ class TestIngestDocumentLogic:
         doc_v2 = self._fake_doc(tmp_path, "MADDE 1 - Yeni hüküm.\nMADDE 2 - Ek hüküm.")
         doc_v2.file_sha256 = "hash-v2"
         doc_v2.doc_id = "hash-v2-fake"
-        embedded, skipped = store.ingest_document(conn, embedder, doc_v2, tmp_path)
-        assert embedded == 2
-        assert skipped == 0
+        result = store.ingest_document(conn, embedder, doc_v2, tmp_path)
+        assert result.embedded == 2
+        assert result.skipped == 0
 
         matrix, ids = store.fetch_active_embeddings(conn)
         assert matrix.shape[0] == 2  # only v2's chunks are active

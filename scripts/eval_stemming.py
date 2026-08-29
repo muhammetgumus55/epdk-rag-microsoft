@@ -133,7 +133,8 @@ def main() -> int:
     _force_utf8_stdout()
     conn = store.connect()
     rows = conn.execute(
-        "SELECT id, text, document_title FROM chunks WHERE active = 1 ORDER BY id"
+        "SELECT id, text, document_title FROM chunks "
+        "WHERE active = 1 AND indexable = 1 ORDER BY id"
     ).fetchall()
     titles = {row[0]: row[2] for row in rows}
     documents = [(row[0], row[1]) for row in rows]

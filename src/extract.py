@@ -609,14 +609,26 @@ class ExtractionRun:
     type_counts: dict[str, int] = field(default_factory=dict)
 
 
-def extract_corpus(root: Path, limit: int | None = None, verbose: bool = True) -> ExtractionRun:
+def extract_corpus(
+    root: Path,
+    limit: int | None = None,
+    verbose: bool = True,
+    paths: list[Path] | None = None,
+) -> ExtractionRun:
     """Extract every extractable document under `root`.
+
+    `paths` extracts an explicit subset instead of scanning `root`, so a partial
+    reprocess reuses this function's .doc batching, duplicate detection and
+    error handling rather than reimplementing them. Note that duplicate
+    detection is then scoped to the subset: two files with identical content
+    both get extracted if only one is in `paths`, which is correct -- the
+    caller asked for those specific documents.
 
     Fails fast (LibreOfficeUnavailable) when .doc files are present but
     LibreOffice is missing, rather than skipping a quarter of the corpus.
     """
     run = ExtractionRun()
-    files = iter_corpus_files(root)
+    files = list(paths) if paths is not None else iter_corpus_files(root)
     if limit:
         files = files[:limit]
 

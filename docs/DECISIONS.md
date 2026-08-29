@@ -133,3 +133,56 @@ Turkish, which is meaningless, and risks corrupting genuine Turkish text
 that later needs to be displayed. Keeping the functions in separate modules
 with distinct names is the guardrail against ever calling the wrong one
 where real text is in play.
+
+## Why the corpus is filtered for domain scope at ingestion
+
+The corpus came from EPDK's electricity mevzuat pages, so every file *arrived*
+under an electricity heading. Its content is not all electricity: a large part
+of the `Kanunlar/` tree is "torba kanun" — omnibus acts that amend dozens of
+unrelated codes in one instrument — and one such file contains the article
+that amended the Electricity Market Law alongside articles amending the
+Criminal Procedure Code, the Tax Procedure Law and the Notaries Act.
+
+Indexed whole, that made questions about kıdem tazminatı, trafik cezası and
+vergi levhası answerable from real, well-scoring chunks. `src/scope.py` now
+classifies each omnibus act's articles individually and excludes the
+out-of-scope ones at ingestion; single-subject electricity documents (529 of
+553) are never touched. A separate hand-maintained override list excludes
+whole single-subject documents that belong to a neighbouring regulator — the
+Nuclear Regulation Law (7381), which is NDK's remit, not EPDK's.
+
+The fix is at ingestion rather than query time on purpose. Excluded chunks are
+stored in full for provenance but never embedded, and are filtered out of both
+the dense matrix and the BM25 index, so there is nothing to retrieve rather
+than something that scores badly. A query-time filter would have to be
+remembered in both rankers; `indexable = 0` with a NULL embedding cannot be
+forgotten.
+
+Full audit, classification rules and per-document counts:
+[`decisions/2026-08-29-omnibus-scope-filter.md`](decisions/2026-08-29-omnibus-scope-filter.md).
+
+## Why one of the three reported failures was not fixed
+
+`kıdem tazminatı` retrieves *correct* electricity law — the Kalite
+Yönetmeliği's outage-compensation formulas, which genuinely say "ödenecek
+tazminat miktarı aşağıdaki formüle göre hesaplanır". No corpus filter reaches
+it, and no cutoff separates it: it scores 0.31580, and a floor above that
+would refuse 3 of 15 (20%) genuinely answerable questions, including planned
+outage notification and rooftop-solar capacity limits.
+
+It is the same structural failure already recorded for "doğal gaz": every word
+of the query matches the corpus except the one a human would use to decide,
+and that word is not rare enough in this corpus to dominate the IDF sum
+(`kıdem` occurs in 13 indexed chunks). Fixing this class needs a query-side
+domain gate or a cross-encoder reranker, not a threshold. Raising
+`FUSION_THRESHOLD` demoted it from `ANSWER` to `ANSWER_WEAK`, which is a
+mitigation, not a fix, and it is recorded as a known limitation rather than
+closed:
+[`decisions/2026-08-29-kidem-tazminati-gate-limit.md`](decisions/2026-08-29-kidem-tazminati-gate-limit.md).
+
+---
+
+Open items that were characterized but deliberately not acted on — qwen3-4b
+output degradation on a long-running Foundry server, and the 31 AMBIGUOUS
+chunks still awaiting a scope ruling — are recorded in
+[`FINDINGS.md`](FINDINGS.md).

@@ -162,8 +162,57 @@ RRF_K = 60
 # natural gas" needs document-level domain filtering or a reranker, not term
 # statistics. The related "rafinerici / petrol stoku" question did improve
 # sharply (0.5536 -> 0.21310, now just above the floor rather than mid-band).
-FUSION_THRESHOLD = 0.23963
-FUSION_FLOOR = 0.1871
+#
+# --------------------------------------------------------------------------
+# RECALIBRATED 2026-08-29, after the corpus scope fix. Previous values were
+# THRESHOLD 0.23963 / FLOOR 0.1871.
+#
+# Two things changed under these cutoffs, and only one of them is a tuning
+# change:
+#
+#  1. The corpus itself. 606 chunks (2.24%) of out-of-scope text -- omnibus-act
+#     articles amending tax, labour, criminal and traffic codes, plus the
+#     Nuclear Regulation Law -- are no longer indexed at all. See
+#     docs/decisions/2026-08-29-omnibus-scope-filter.md. Retrieval now runs over
+#     26,441 chunks, not 27,047.
+#  2. The calibration set. The not-answerable class went from 6 questions to 21.
+#     The old six were almost all energy-ADJACENT (doğal gaz, LPG, akaryakıt,
+#     petrol), which measured only the hardest case and left the easy case
+#     unmeasured -- so nothing in the old numbers could have revealed that
+#     questions about kıdem tazminatı or trafik cezası were being answered. The
+#     new negatives span labour, tax, traffic, criminal, family and civil-service
+#     law, and include the three real failures reported by a user.
+#
+# Measured over 26,441 chunks, 15 answerable + 21 not-answerable, each run as
+# typed and ASCII-folded:
+#
+#   answerable    (n=15): min 0.18804  median 0.41094  max 0.67547
+#   not answerable (n=21): min 0.05641  median 0.17950  max 0.50657
+#
+# Classes still overlap, so the two cutoffs keep doing their separate jobs.
+# THRESHOLD is the Youden-optimal observed cutoff, which moved UP from 0.23963
+# to 0.32979 (J improved 0.767 -> 0.752 on a set 71% larger and far harder; the
+# old J was measured against six mostly-adjacent negatives and was optimistic).
+# At 0.32979, 80% of answerable questions are at or above it against 5% of
+# not-answerable. FLOOR stays anchored at the lowest answerable score, so no
+# genuinely answerable question is ever refused.
+#
+# What the higher threshold costs, stated plainly: three answerable questions
+# move from ANSWER to ANSWER_WEAK (arz güvenliği 0.18804, planlı kesinti
+# bildirimi 0.23964, çatı tipi GES kurulu güç 0.24807). They are still answered,
+# with the low-confidence flag set. That is the price of demoting kıdem
+# tazminatı out of ANSWER, and it is worth paying; refusing them outright would
+# not be, which is why FLOOR did not move up with THRESHOLD.
+#
+# STILL UNFIXED, and it cannot be fixed here: "Kıdem tazminatı nasıl
+# hesaplanır?" scores 0.31580 and lands in ANSWER_WEAK, not NOT_FOUND. It
+# retrieves genuine electricity law -- the Kalite Yönetmeliği's kesinti
+# tazminatı formulas -- so the corpus filter does not touch it and no cutoff
+# separates it: a FLOOR above 0.31580 would refuse 3 of 15 (20%) real
+# answerable questions. See
+# docs/decisions/2026-08-29-kidem-tazminati-gate-limit.md for the full argument.
+FUSION_THRESHOLD = 0.32979
+FUSION_FLOOR = 0.18804
 # How deep each ranker goes before fusion. Fusion can only rescue a chunk that
 # at least one ranker surfaced, so this is set well above TOP_K -- the whole
 # point is for BM25 to promote something dense ranked 30th, and vice versa.
