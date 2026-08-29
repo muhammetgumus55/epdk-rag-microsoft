@@ -20,17 +20,24 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 
-from . import config
+from . import config, scope
 from .chunk import Chunk, chunk_document
 from .embed import EmbeddingClient
 from .extract import ExtractedDoc, _force_utf8_stdout, extract_corpus
 from .titles import extract_title
 
+# `embedding` and `embedded_at` are NULLable, and that is the point of the
+# out-of-scope design rather than an oversight: a chunk excluded by src.scope is
+# still stored in full, so the corpus keeps complete provenance of what the
+# source documents contain, but it is never sent to the embedding model and has
+# no vector. `indexable = 0` is therefore a stronger guarantee than a query-time
+# filter -- there is nothing to retrieve, not merely something that scores badly.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chunks (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,15 +50,88 @@ CREATE TABLE IF NOT EXISTS chunks (
     page_start    INTEGER,
     page_end      INTEGER,
     quality_flag  TEXT,
-    embedding     BLOB NOT NULL,
-    embedded_at   TEXT NOT NULL,
+    embedding     BLOB,
+    embedded_at   TEXT,
     active        INTEGER NOT NULL DEFAULT 1,
+    indexable     INTEGER NOT NULL DEFAULT 1,
+    scope_label   TEXT,
     UNIQUE (file_sha256, chunk_index)
 );
+"""
+
+# Created after _migrate(), never inside SCHEMA: on a store built before the
+# scope work the `indexable` column does not exist yet, and SCHEMA runs first,
+# so indexing it there fails the whole script before the migration can add it.
+INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_chunks_source_path ON chunks(source_path);
 CREATE INDEX IF NOT EXISTS idx_chunks_file_hash    ON chunks(file_sha256);
 CREATE INDEX IF NOT EXISTS idx_chunks_active       ON chunks(active);
+CREATE INDEX IF NOT EXISTS idx_chunks_indexable    ON chunks(indexable);
 """
+
+# Columns added after the first corpus was built. ALTER TABLE ADD COLUMN is
+# enough for these two -- both have defaults and neither changes an existing
+# constraint.
+_ADDED_COLUMNS = (
+    ("indexable", "INTEGER NOT NULL DEFAULT 1"),
+    ("scope_label", "TEXT"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an existing store up to the current schema, in place.
+
+    Two changes, and they need different treatment. The new columns are a plain
+    ALTER TABLE. Relaxing `embedding`/`embedded_at` from NOT NULL to NULLable is
+    not expressible as an ALTER in SQLite at all, so it needs the standard
+    table-rebuild dance -- done inside one transaction so a crash mid-migration
+    leaves the old table intact rather than a half-copied one.
+    """
+    columns = {row[1]: row for row in conn.execute("PRAGMA table_info(chunks)")}
+    if not columns:  # fresh database; SCHEMA already created it correctly
+        return
+
+    for name, definition in _ADDED_COLUMNS:
+        if name not in columns:
+            conn.execute(f"ALTER TABLE chunks ADD COLUMN {name} {definition}")
+            conn.commit()
+
+    # notnull is column 3 of PRAGMA table_info. Only rebuild if it still applies.
+    if not columns["embedding"][3]:
+        return
+
+    conn.executescript(
+        """
+        BEGIN;
+        CREATE TABLE chunks_migrated (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_path   TEXT NOT NULL,
+            file_sha256   TEXT NOT NULL,
+            document_title TEXT,
+            chunk_index   INTEGER NOT NULL,
+            text          TEXT NOT NULL,
+            article_ref   TEXT,
+            page_start    INTEGER,
+            page_end      INTEGER,
+            quality_flag  TEXT,
+            embedding     BLOB,
+            embedded_at   TEXT,
+            active        INTEGER NOT NULL DEFAULT 1,
+            indexable     INTEGER NOT NULL DEFAULT 1,
+            scope_label   TEXT,
+            UNIQUE (file_sha256, chunk_index)
+        );
+        INSERT INTO chunks_migrated
+            SELECT id, source_path, file_sha256, document_title, chunk_index, text,
+                   article_ref, page_start, page_end, quality_flag, embedding,
+                   embedded_at, active, indexable, scope_label
+            FROM chunks;
+        DROP TABLE chunks;
+        ALTER TABLE chunks_migrated RENAME TO chunks;
+        COMMIT;
+        """
+    )
+    conn.commit()
 
 
 class DimensionMismatch(Exception):
@@ -73,6 +153,9 @@ def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     # committed batches survive a crash mid-run -- both matter for resumability.
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    conn.commit()
+    _migrate(conn)
+    conn.executescript(INDEXES)
     conn.commit()
     return conn
 
@@ -108,7 +191,12 @@ def has_active_chunks(conn: sqlite3.Connection, file_sha256: str) -> bool:
 
 
 def existing_chunk_indices(conn: sqlite3.Connection, file_sha256: str) -> set[int]:
-    """Which chunk_index values are already active for this content -- the resume set."""
+    """Which chunk_index values are already active for this content -- the resume set.
+
+    Deliberately counts non-indexable chunks as done. They are stored and final;
+    a resumed run must not treat "has no embedding" as "still needs embedding"
+    and send excluded text to the model on every rerun.
+    """
     rows = conn.execute(
         "SELECT chunk_index FROM chunks WHERE file_sha256 = ? AND active = 1", (file_sha256,)
     )
@@ -120,6 +208,25 @@ def mark_document_inactive(conn: sqlite3.Connection, source_path: str) -> int:
     cur = conn.execute(
         "UPDATE chunks SET active = 0 WHERE source_path = ? AND active = 1", (source_path,)
     )
+    conn.commit()
+    return cur.rowcount
+
+
+def delete_document_chunks(conn: sqlite3.Connection, source_path: str) -> int:
+    """Remove a document's chunks outright. Returns rows deleted.
+
+    Used by the reprocess path, where marking inactive is not enough and would
+    silently do the wrong thing. UNIQUE(file_sha256, chunk_index) does not
+    consider `active`, so when a document is rebuilt from UNCHANGED source
+    bytes -- exactly the reprocess case, since only our scope rules moved --
+    every re-inserted row collides with the retired one and INSERT OR IGNORE
+    drops it, leaving the document with no active chunks at all.
+
+    Retiring is right when content changed: the old rows keep a distinct
+    file_sha256 and stay as history. Here the old rows are the same text under a
+    stale policy, so they are litter, not provenance.
+    """
+    cur = conn.execute("DELETE FROM chunks WHERE source_path = ?", (source_path,))
     conn.commit()
     return cur.rowcount
 
@@ -136,10 +243,16 @@ def insert_chunks(
     file_sha256: str,
     document_title: str | None,
     chunks: list[Chunk],
-    embeddings: list[list[float]],
+    embeddings: list[list[float] | None],
     quality_flag: str | None,
+    scope_labels: list[str | None] | None = None,
 ) -> int:
-    """Insert a batch of already-embedded chunks and commit. Returns rows inserted.
+    """Insert a batch of chunks and commit. Returns rows inserted.
+
+    An embedding of None marks a chunk excluded by src.scope: it is stored in
+    full for provenance, with a NULL vector and indexable = 0, and can never be
+    retrieved. `scope_labels` carries why, or None for chunks in single-subject
+    documents that were never classified at all.
 
     UNIQUE(file_sha256, chunk_index) makes this safe to call again with
     overlapping chunks after a crash: INSERT OR IGNORE silently skips any
@@ -147,6 +260,9 @@ def insert_chunks(
     """
     if len(chunks) != len(embeddings):
         raise ValueError(f"{len(chunks)} chunks but {len(embeddings)} embeddings")
+    labels = scope_labels if scope_labels is not None else [None] * len(chunks)
+    if len(labels) != len(chunks):
+        raise ValueError(f"{len(chunks)} chunks but {len(labels)} scope labels")
     now = datetime.now(timezone.utc).isoformat()
     rows = [
         (
@@ -159,17 +275,20 @@ def insert_chunks(
             chunk.page_start,
             chunk.page_end,
             quality_flag,
-            _serialize(vector),
-            now,
+            None if vector is None else _serialize(vector),
+            None if vector is None else now,
+            0 if vector is None else 1,
+            label,
         )
-        for chunk, vector in zip(chunks, embeddings)
+        for chunk, vector, label in zip(chunks, embeddings, labels)
     ]
     cur = conn.executemany(
         """
         INSERT OR IGNORE INTO chunks
             (source_path, file_sha256, document_title, chunk_index, text,
-             article_ref, page_start, page_end, quality_flag, embedding, embedded_at, active)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+             article_ref, page_start, page_end, quality_flag, embedding, embedded_at,
+             indexable, scope_label, active)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
         """,
         rows,
     )
@@ -183,12 +302,18 @@ def insert_chunks(
 
 
 def fetch_active_embeddings(conn: sqlite3.Connection) -> tuple[np.ndarray, list[int]]:
-    """All active embeddings as one (N, EMBEDDING_DIM) float32 matrix, plus parallel chunk ids.
+    """All active, in-scope embeddings as one (N, EMBEDDING_DIM) float32 matrix, plus ids.
+
+    `indexable = 1` is what keeps out-of-scope text out of retrieval. Those rows
+    have no embedding at all, so this is not a filter that could be forgotten
+    somewhere else in the stack -- there is no vector for them to match against.
 
     Raises DimensionMismatch rather than returning a matrix that would silently
     corrupt every downstream similarity computation.
     """
-    rows = conn.execute("SELECT id, embedding FROM chunks WHERE active = 1 ORDER BY id").fetchall()
+    rows = conn.execute(
+        "SELECT id, embedding FROM chunks WHERE active = 1 AND indexable = 1 ORDER BY id"
+    ).fetchall()
     if not rows:
         return np.empty((0, config.EMBEDDING_DIM), dtype=np.float32), []
 
@@ -243,20 +368,39 @@ def _quality_flag_for(doc: ExtractedDoc, title_flags: list[str]) -> str | None:
     return "; ".join(combined) if combined else None
 
 
+@dataclass
+class IngestResult:
+    """What one document's ingest did, split by scope disposition."""
+
+    embedded: int = 0
+    skipped: int = 0        # already active from a previous run
+    excluded: int = 0       # stored non-indexable: out of scope
+    disposition: str = "IN_SCOPE"
+
+
 def ingest_document(
     conn: sqlite3.Connection,
     embedder: EmbeddingClient,
     doc: ExtractedDoc,
     root: Path,
-) -> tuple[int, int]:
-    """Embed and store one document's chunks. Returns (embedded, skipped) chunk counts."""
+) -> IngestResult:
+    """Scope, embed and store one document's chunks.
+
+    Out-of-scope chunks (src.scope) are stored with a NULL embedding and
+    indexable = 0 -- kept for provenance, never sent to the embedding model,
+    never retrievable.
+    """
     info = extract_title(doc)
     chunks = chunk_document(doc, info)
     if not chunks:
-        return 0, 0
+        return IngestResult()
 
     source_path = _rel(doc.path, root)
     quality_flag = _quality_flag_for(doc, info.flags)
+
+    decision, verdicts = scope.scope_chunks(
+        info.title, [(str(c.article) if c.article else None, c.text) for c in chunks]
+    )
 
     prior_hash = active_hash_for_path(conn, source_path)
     if prior_hash is not None and prior_hash != doc.file_sha256:
@@ -267,30 +411,51 @@ def ingest_document(
     else:
         done = existing_chunk_indices(conn, doc.file_sha256)
 
-    todo = [c for c in chunks if c.index not in done]
-    if not todo:
-        return 0, len(chunks)
+    pending = [(c, v) for c, v in zip(chunks, verdicts) if c.index not in done]
+    result = IngestResult(skipped=len(chunks) - len(pending), disposition=decision.disposition)
+    if not pending:
+        return result
 
-    embedded = 0
     size = config.EMBED_BATCH_SIZE
-    for start in range(0, len(todo), size):
-        batch = todo[start : start + size]
-        vectors = embedder.embed_batch([c.text for c in batch])
+    for start in range(0, len(pending), size):
+        batch = pending[start : start + size]
+        # Only in-scope chunks are embedded. The excluded ones are interleaved
+        # with them in document order, so their vectors are filled back in as
+        # None rather than the batch being split and reassembled.
+        wanted = [c for c, v in batch if v is None or v.indexable]
+        vectors = embedder.embed_batch([c.text for c in wanted]) if wanted else []
+        by_index = {c.index: vec for c, vec in zip(wanted, vectors)}
         insert_chunks(
             conn,
             source_path=source_path,
             file_sha256=doc.file_sha256,
             document_title=info.title,
-            chunks=batch,
-            embeddings=vectors,
+            chunks=[c for c, _ in batch],
+            embeddings=[by_index.get(c.index) for c, _ in batch],
             quality_flag=quality_flag,
+            scope_labels=[None if v is None else v.label for _, v in batch],
         )
-        embedded += len(batch)
-    return embedded, len(chunks) - len(todo)
+        result.embedded += len(wanted)
+        result.excluded += len(batch) - len(wanted)
+    return result
 
 
-def run_ingest(root: Path, db_path: str | Path | None = None, verbose: bool = True) -> dict:
-    """Full extract -> chunk -> embed -> store pass. Returns summary counters."""
+def run_ingest(
+    root: Path,
+    db_path: str | Path | None = None,
+    verbose: bool = True,
+    only: list[Path] | None = None,
+) -> dict:
+    """Full extract -> scope -> chunk -> embed -> store pass. Returns summary counters.
+
+    `only` restricts the run to an explicit list of files and RETIRES each of
+    them first, which is what makes a partial reprocess possible at all. The
+    normal resume path deliberately skips any document whose file_sha256 is
+    unchanged, so a policy change -- new scope rules, an added manual exclusion --
+    is invisible to it: the bytes on disk are identical, only our judgement about
+    them moved. Retiring first forces those documents to be rebuilt from source
+    while every other document in the store is left completely alone.
+    """
     started = time.monotonic()
     conn = connect(db_path)
     embedder = EmbeddingClient.connect()
@@ -299,23 +464,36 @@ def run_ingest(root: Path, db_path: str | Path | None = None, verbose: bool = Tr
         print(f"Embedding model : {embedder.model_id}")
         print(f"Embedding dim   : {embedder.dimension}")
         print(f"Database        : {config.DB_PATH if db_path is None else db_path}")
-        print(f"\nScanning {root.resolve()} ...")
 
-    run = extract_corpus(root, verbose=verbose)
+    if only is not None:
+        if verbose:
+            print(f"\nReprocessing {len(only)} document(s); the rest of the store is untouched.")
+        removed = 0
+        for path in only:
+            removed += delete_document_chunks(conn, _rel(path, root))
+        if verbose:
+            print(f"Removed {removed} existing chunk(s) from those documents.")
+        run = extract_corpus(root, verbose=verbose, paths=only)
+    else:
+        if verbose:
+            print(f"\nScanning {root.resolve()} ...")
+        run = extract_corpus(root, verbose=verbose)
 
     docs_processed = 0
-    chunks_embedded = 0
-    chunks_skipped = 0
+    totals = IngestResult()
+    dispositions: dict[str, int] = {}
     for i, doc in enumerate(run.docs, start=1):
-        embedded, skipped = ingest_document(conn, embedder, doc, root)
-        chunks_embedded += embedded
-        chunks_skipped += skipped
+        result = ingest_document(conn, embedder, doc, root)
+        totals.embedded += result.embedded
+        totals.skipped += result.skipped
+        totals.excluded += result.excluded
+        dispositions[result.disposition] = dispositions.get(result.disposition, 0) + 1
         docs_processed += 1
-        if verbose and (embedded or i % 25 == 0 or i == len(run.docs)):
+        if verbose and (result.embedded or result.excluded or i % 25 == 0 or i == len(run.docs)):
             print(
-                f"  [{i}/{len(run.docs)}] {doc.doc_id}  "
-                f"embedded={embedded} skipped={skipped} "
-                f"(total embedded={chunks_embedded}, skipped={chunks_skipped})",
+                f"  [{i}/{len(run.docs)}] {doc.doc_id}  [{result.disposition}]  "
+                f"embedded={result.embedded} excluded={result.excluded} "
+                f"skipped={result.skipped}",
                 flush=True,
             )
 
@@ -323,11 +501,35 @@ def run_ingest(root: Path, db_path: str | Path | None = None, verbose: bool = Tr
     elapsed = time.monotonic() - started
     return {
         "documents_processed": docs_processed,
-        "chunks_embedded": chunks_embedded,
-        "chunks_skipped": chunks_skipped,
+        "chunks_embedded": totals.embedded,
+        "chunks_skipped": totals.skipped,
+        "chunks_excluded": totals.excluded,
+        "dispositions": dispositions,
         "embedding_dim": embedder.dimension,
         "elapsed_seconds": elapsed,
     }
+
+
+def scoped_out_documents(root: Path, verbose: bool = True) -> list[Path]:
+    """Every file under `root` that src.scope would filter or exclude outright.
+
+    Extraction-only: it reads and classifies but writes nothing, so it is safe to
+    run before deciding to reprocess. This is what --reprocess-scope uses to work
+    out which documents need rebuilding, so the set comes from the same
+    classifier that will run during ingest rather than a hand-maintained list
+    that could drift from it.
+    """
+    run = extract_corpus(root, verbose=verbose)
+    selected: list[Path] = []
+    for doc in run.docs:
+        info = extract_title(doc)
+        chunks = chunk_document(doc, info)
+        if not chunks:
+            continue
+        opening = "\n".join(c.text for c in chunks[:2])
+        if scope.document_scope(info.title, opening).disposition != "IN_SCOPE":
+            selected.append(doc.path)
+    return selected
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -340,15 +542,48 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m src.store")
     parser.add_argument("--root", default="data", help="corpus root (default: data)")
     parser.add_argument("--db", default=None, help=f"SQLite path (default: {config.DB_PATH})")
+    parser.add_argument(
+        "--only", nargs="+", metavar="PATH", default=None,
+        help="reprocess just these files: retire their stored chunks and rebuild "
+             "them from source. Every other document is left untouched.",
+    )
+    parser.add_argument(
+        "--reprocess-scope", action="store_true",
+        help="reprocess exactly the documents src.scope filters or excludes "
+             "(omnibus acts + manual exclusions). Use after changing scope rules.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="with --reprocess-scope, list the documents that would be rebuilt and stop.",
+    )
     args = parser.parse_args(argv)
 
     root = Path(args.root)
     if not root.exists():
         print(f"error: corpus root {root} does not exist")
         return 2
+    if args.only and args.reprocess_scope:
+        print("error: --only and --reprocess-scope are mutually exclusive")
+        return 2
+
+    only: list[Path] | None = None
+    if args.reprocess_scope:
+        only = scoped_out_documents(root)
+        print(f"\n{len(only)} document(s) are out of scope or need article filtering:")
+        for path in only:
+            print(f"  {_rel(path, root)}")
+        if args.dry_run:
+            print("\n--dry-run: nothing written.")
+            return 0
+    elif args.only:
+        only = [Path(p) for p in args.only]
+        missing = [p for p in only if not p.exists()]
+        if missing:
+            print(f"error: not found: {', '.join(str(p) for p in missing)}")
+            return 2
 
     try:
-        summary = run_ingest(root, db_path=args.db)
+        summary = run_ingest(root, db_path=args.db, only=only)
     except FoundryUnavailable as exc:
         print(f"\nFATAL: {exc}")
         return 3
@@ -357,7 +592,9 @@ def main(argv: list[str] | None = None) -> int:
     print("EMBED + STORE REPORT")
     print("=" * 72)
     print(f"Documents processed : {summary['documents_processed']}")
+    print(f"  by disposition    : {summary['dispositions']}")
     print(f"Chunks embedded     : {summary['chunks_embedded']}")
+    print(f"Chunks excluded     : {summary['chunks_excluded']} (stored, not indexable)")
     print(f"Chunks skipped      : {summary['chunks_skipped']} (already active + unchanged)")
     print(f"Embedding dimension : {summary['embedding_dim']}")
     print(f"Elapsed             : {summary['elapsed_seconds']:.1f}s")

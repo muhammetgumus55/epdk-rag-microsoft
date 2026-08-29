@@ -167,9 +167,17 @@ class BM25Index:
 
     @classmethod
     def from_connection(cls, conn: sqlite3.Connection) -> "BM25Index":
-        """Build over every active chunk, ordered by id to match the dense matrix."""
+        """Build over every active, in-scope chunk, ordered by id to match the dense matrix.
+
+        `indexable = 1` must match store.fetch_active_embeddings() exactly. The
+        dense side excludes out-of-scope chunks for free (they have no vector),
+        but BM25 indexes text, and text is exactly what those rows still hold --
+        so without this filter an excluded article stays fully searchable
+        lexically, which is the half of the hybrid that matched the omnibus
+        chunks behind the trafik/vergi failures in the first place.
+        """
         rows = conn.execute(
-            "SELECT id, text FROM chunks WHERE active = 1 ORDER BY id"
+            "SELECT id, text FROM chunks WHERE active = 1 AND indexable = 1 ORDER BY id"
         ).fetchall()
         return cls.build([(row[0], row[1]) for row in rows])
 
