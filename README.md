@@ -92,20 +92,24 @@ than re-embedding from scratch.
 
 ## Running it
 
-With Foundry Local's daemon running (`foundry status` shows `Reachable`):
+With Foundry Local's daemon running — `foundry status` should show
+`Local service: Reachable`; start it with `foundry server start` if it does
+not:
 
 ```
 python -m src.extract          # optional: extraction-only report (types, quality flags, titles)
 python -m src.store             # full pipeline: extract -> chunk -> embed -> write to data/epdk.db
-$env:EPDK_UI_PASSWORD = "choose-a-password"
 streamlit run app.py
 ```
 
-`EPDK_UI_PASSWORD` gates the whole UI behind a single shared password
-(`hmac`-compared, never hardcoded) — set it as an environment variable
-before launch, or in `.streamlit/secrets.toml` as `EPDK_UI_PASSWORD = "..."`
-(gitignored; never commit it). Without it set, the login page tells the user
-so explicitly rather than silently failing open.
+**The UI has no authentication.** The single-shared-password gate was
+removed: `require_login()`, `_configured_password()` and `_check_password()`
+are still defined in `app.py` but nothing calls them, so `EPDK_UI_PASSWORD`
+is not read at startup and `.streamlit/secrets.toml` is not needed to run the
+app. Anyone who can reach the Streamlit port can query the corpus and, behind
+it, the local models — so run it on a trusted network, or behind a reverse
+proxy that does its own authentication. Reinstating the gate is a one-line
+change: call `require_login()` from `main()` again.
 
 For one-off CLI use without the UI:
 
